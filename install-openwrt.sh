@@ -46,6 +46,18 @@ usage() {
 EOF
 }
 
+# читаем config.env рядом со скриптом (если есть). Из него берём SERVER_IP+PROXY_PORT
+# (=> PEER), VK_LINK, THREADS, USE_UDP. Флаги ниже переопределяют.
+_HERE="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)"
+if [ -f "$_HERE/config.env" ]; then
+  # shellcheck disable=SC1091
+  . "$_HERE/config.env"
+  [ -n "${SERVER_IP:-}" ] && PEER="${SERVER_IP}:${PROXY_PORT:-56000}"
+  [ -n "${VK_LINK:-}" ] && VK_LINK="${VK_LINK}"
+  [ -n "${THREADS:-}" ] && THREADS="${THREADS}"
+  [ "${USE_UDP:-0}" = "1" ] && USE_UDP="1"
+fi
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --peer)        PEER="$2"; shift 2 ;;
@@ -192,12 +204,15 @@ CONF=/etc/vkturn/vkturn.conf
 
 start_service() {
   [ -f "$CONF" ] || { echo "vkturn: нет $CONF"; return 1; }
+  killall vkturn-client 2>/dev/null   # добить возможные зависшие процессы
   # shellcheck disable=SC1090
   . "$CONF"
   procd_open_instance
-  # stdout+stderr клиента -> route-guard (он же логирует всё в procd)
-  procd_set_param command /bin/sh -c \
-    "exec /usr/sbin/vkturn-client -peer \"$PEER\" $LINK_ARG -listen \"$LISTEN\" -n \"$THREADS\" $EXTRA 2>&1 | /usr/sbin/vkturn-routes"
+  # Клиент запускается НАПРЯМУЮ (без пайпа через sh -c), чтобы procd видел
+  # настоящий PID и чисто убивал его при stop/restart. Иначе зависший клиент
+  # держит 127.0.0.1:9000 и новый инстанс падает с "address already in use".
+  # shellcheck disable=SC2086
+  procd_set_param command /usr/sbin/vkturn-client -peer "$PEER" $LINK_ARG -listen "$LISTEN" -n "$THREADS" $EXTRA
   procd_set_param respawn 3600 5 0
   procd_set_param stdout 1
   procd_set_param stderr 1
@@ -205,7 +220,7 @@ start_service() {
 }
 
 stop_service() {
-  :
+  killall vkturn-client 2>/dev/null
 }
 INIT
 chmod +x /etc/init.d/vkturn
@@ -233,6 +248,105 @@ esac
 MGR
 chmod +x /usr/sbin/vkturn
 
+# ---- LAN-шлюз капчи (опционально) --------------------------------------------
+# Если рядом лежит бинарник captcha-lan-gw (собран build-client.sh) — ставим сервис,
+# чтобы капчу можно было решать через http://<ip-роутера>:8766 без ssh -L.
+GW_SRC=""
+for c in "$_HERE/captcha-lan-gw-linux-$ARCH" "$_HERE/build/captcha-lan-gw-linux-$ARCH" "$_HERE/captcha-lan-gw"; do
+  [ -f "$c" ] && { GW_SRC="$c"; break; }
+done
+if [ -n "$GW_SRC" ]; then
+  cp "$GW_SRC" /usr/sbin/vkturn-captcha-gw && chmod +x /usr/sbin/vkturn-captcha-gw
+  cat > /etc/init.d/vkturn-captcha-gw <<'GWINIT'
+#!/bin/sh /etc/rc.common
+# LAN-шлюз страницы капчи vk-turn: http://<ip-роутера>:8766 -> 127.0.0.1:8765
+START=96
+STOP=10
+USE_PROCD=1
+start_service() {
+  procd_open_instance
+  procd_set_param command /usr/sbin/vkturn-captcha-gw
+  procd_set_param env LISTEN=0.0.0.0:8766 UPSTREAM=http://127.0.0.1:8765
+  procd_set_param respawn 3600 5 0
+  procd_set_param stdout 1
+  procd_set_param stderr 1
+  procd_close_instance
+}
+GWINIT
+  chmod +x /etc/init.d/vkturn-captcha-gw
+  /etc/init.d/vkturn-captcha-gw enable >/dev/null 2>&1 || true
+  /etc/init.d/vkturn-captcha-gw restart >/dev/null 2>&1 || true
+  log "LAN-шлюз капчи установлен: реши капчу по http://<ip-роутера>:8766"
+else
+  warn "Бинарник captcha-lan-gw не найден рядом — LAN-страница капчи не установлена."
+  warn "Собери его: ./build-client.sh ${ARCH}  (появится build/captcha-lan-gw-linux-${ARCH})"
+fi
+
+# ---- watchdog: авто-восстановление туннеля (напр. после reload zeroblock) ----
+AWG_IFACE="${AWG_IFACE:-VKTURN}"
+AWG_PEER_IP="${AWG_PEER_IP:-10.8.1.1}"
+cat > /usr/sbin/vkturn-watchdog <<WD
+#!/bin/sh
+# Следит за туннелем и восстанавливает его при обрыве. По возможности БЕЗ капчи:
+# мягко поднимает интерфейс; клиента перезапускает лишь как крайнюю меру и НИКОГДА
+# во время ожидания капчи (иначе получится луп перезапросов к VK).
+IFACE="${AWG_IFACE}"
+PEER_IP="${AWG_PEER_IP}"
+POLL_OK=20; POLL_BAD=10; HARD_AFTER=18
+LOG(){ logger -t vkturn-wd "\$*"; }
+lan_ip(){ uci -q get network.lan.ipaddr 2>/dev/null || echo "<ip-роутера>"; }
+tunnel_ok(){ ping -c1 -W3 "\$PEER_IP" >/dev/null 2>&1; }
+client_running(){ pgrep -f "/usr/sbin/vkturn-client" >/dev/null 2>&1; }
+captcha_pending(){ netstat -lnt 2>/dev/null | grep -q ":8765" || ss -lnt 2>/dev/null | grep -q ":8765"; }
+LOG "watchdog запущен (iface=\$IFACE peer=\$PEER_IP)"
+FAILS=0
+while :; do
+  if tunnel_ok; then
+    [ "\$FAILS" -gt 0 ] && LOG "туннель восстановлен"; FAILS=0; sleep "\$POLL_OK"; continue
+  fi
+  if captcha_pending; then
+    LOG "туннель down: ждёт КАПЧУ — открой http://\$(lan_ip):8766"; FAILS=0; sleep "\$POLL_BAD"; continue
+  fi
+  FAILS=\$((FAILS+1)); LOG "туннель down (fail #\$FAILS) — восстанавливаю"
+  client_running || { LOG "client не запущен -> старт"; /etc/init.d/vkturn start 2>/dev/null; sleep 8; }
+  ifup "\$IFACE" 2>/dev/null
+  if [ "\$FAILS" -ge "\$HARD_AFTER" ] && client_running && ! captcha_pending; then
+    LOG "долгий обрыв -> перезапуск клиента (может нужна капча http://\$(lan_ip):8766)"
+    /etc/init.d/vkturn restart 2>/dev/null; FAILS=0
+  fi
+  sleep "\$POLL_BAD"
+done
+WD
+chmod +x /usr/sbin/vkturn-watchdog
+cat > /etc/init.d/vkturn-watchdog <<'WDI'
+#!/bin/sh /etc/rc.common
+START=97
+STOP=10
+USE_PROCD=1
+start_service() {
+  procd_open_instance
+  procd_set_param command /usr/sbin/vkturn-watchdog
+  procd_set_param respawn 3600 5 0
+  procd_set_param stdout 1
+  procd_set_param stderr 1
+  procd_close_instance
+}
+WDI
+chmod +x /etc/init.d/vkturn-watchdog
+# hotplug: мгновенная реакция на возврат сети (WAN/VKTURN ifup)
+mkdir -p /etc/hotplug.d/iface
+cat > /etc/hotplug.d/iface/99-vkturn-recover <<HP
+#!/bin/sh
+[ "\$ACTION" = "ifup" ] || exit 0
+case "\$INTERFACE" in
+  wan|wan6|${AWG_IFACE}) ( sleep 3; ifup ${AWG_IFACE} 2>/dev/null ) & ;;
+esac
+HP
+chmod +x /etc/hotplug.d/iface/99-vkturn-recover
+/etc/init.d/vkturn-watchdog enable >/dev/null 2>&1 || true
+/etc/init.d/vkturn-watchdog restart >/dev/null 2>&1 || true
+log "Watchdog установлен: туннель авто-восстанавливается после обрывов (reload zeroblock и т.п.)"
+
 # ---- запуск ------------------------------------------------------------------
 /etc/init.d/vkturn enable  >/dev/null 2>&1 || true
 /etc/init.d/vkturn restart
@@ -254,4 +368,11 @@ cat <<EOF
 ВАЖНО: включай туннель ТОЛЬКО после 'Established DTLS connection!'.
 Если хендшейк AmneziaWG не проходит — переустанови с флагом --udp.
 Подробности: docs/openwrt-amneziawg.md
+
+*** КАПЧА VK ***
+Этот бинарник — релизный (v1.8.3) и НЕ проходит новую капчу VK «Я Не Робот»
+(в логах: 'missing captcha_sid' по кругу). Нужен ПРОПАТЧЕННЫЙ клиент:
+собери его через build-client.sh и подмени /usr/sbin/vkturn-client.
+Капчу всё равно придётся решать вручную через браузер (ssh -L 8765:localhost:8765).
+Подробности: docs/captcha-manual.md
 EOF

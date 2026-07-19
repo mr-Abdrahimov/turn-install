@@ -33,6 +33,14 @@ SVC_NAME="vk-turn-server"
 ASSUME_YES=0
 CLIENT_NAME="router"
 
+# читаем config.env рядом со скриптом (если есть) — переопределяет дефолты выше,
+# флаги командной строки затем переопределяют config.env.
+_HERE="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)"
+if [ -f "$_HERE/config.env" ]; then
+  # shellcheck disable=SC1091
+  . "$_HERE/config.env"
+fi
+
 usage() {
   cat <<'EOF'
 Использование: sudo bash install-server.sh [опции]
@@ -61,7 +69,7 @@ done
 # ----------------------------------------------------------------------------
 # Утилиты вывода
 # ----------------------------------------------------------------------------
-c_grn='\033[1;32m'; c_yel='\033[1;33m'; c_red='\033[1;31m'; c_dim='\033[2m'; c_rst='\033[0m'
+c_grn=$'\033[1;32m'; c_yel=$'\033[1;33m'; c_red=$'\033[1;31m'; c_dim=$'\033[2m'; c_rst=$'\033[0m'
 log()  { printf "${c_grn}==>${c_rst} %s\n" "$*"; }
 warn() { printf "${c_yel}[!]${c_rst} %s\n" "$*" >&2; }
 err()  { printf "${c_red}[ОШИБКА]${c_rst} %s\n" "$*" >&2; exit 1; }
@@ -264,8 +272,12 @@ install_vkturn_bin() {
     url="https://github.com/${CORE_REPO}/releases/latest/download/server-linux-${ARCH}"
     warn "Через API ассет не найден, пробую прямую ссылку: $url"
   fi
-  curl -fSL --retry 3 -o "$BIN_PATH" "$url" || err "Не удалось скачать бинарник server-linux-${ARCH}"
-  chmod +x "$BIN_PATH"
+  # качаем во временный файл и заменяем атомарно через mv:
+  # curl -o по работающему бинарнику даёт «Text file busy» при повторном запуске.
+  local tmp; tmp="$(mktemp)"
+  curl -fSL --retry 3 -o "$tmp" "$url" || { rm -f "$tmp"; err "Не удалось скачать бинарник server-linux-${ARCH}"; }
+  chmod +x "$tmp"
+  mv -f "$tmp" "$BIN_PATH"
   log "Установлен: $BIN_PATH"
 }
 
@@ -329,10 +341,11 @@ add_client() {
   cpub="$(printf '%s' "$cpriv" | awg pubkey)"
   cpsk="$(awg genpsk)"
 
-  # выделяем следующий свободный IP .2, .3, … (берём 4-й октет из строк AllowedIPs пиров)
+  # выделяем следующий свободный IP .2, .3, … (берём 4-й октет из строк AllowedIPs пиров).
+  # `|| true` обязателен: при отсутствии пиров grep вернёт 1 и оборвёт скрипт под set -e.
   local last
   last="$(grep -oE 'AllowedIPs = 10\.8\.1\.[0-9]+' "$conf" 2>/dev/null \
-          | grep -oE '[0-9]+$' | sort -n | tail -n1)"
+          | grep -oE '[0-9]+$' | sort -n | tail -n1 || true)"
   [ -n "$last" ] || last=1
   cip="10.8.1.$(( last + 1 ))"
 
