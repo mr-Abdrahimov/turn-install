@@ -91,11 +91,11 @@ return view.extend({
 			'type': 'text', 'class': 'cbi-input-text', style: 'width:100%',
 			'placeholder': 'https://ваш-сервер/orangevpn.json', 'value': info.url || ''
 		});
-		var vkInput = E('input', {
-			'type': 'text', 'class': 'cbi-input-text', style: 'width:100%',
-			'placeholder': 'https://vk.ru/call/join/... (ссылка на звонок VK)',
-			'value': ''
-		});
+		var vkNote = info.vk_link_from_list
+			? E('span', { style: 'color:#080' }, _('✓ приходит из списка серверов'))
+			: (info.has_vk_link
+				? E('span', { style: 'color:#888' }, _('задана локально (в списке её нет)'))
+				: E('span', { style: 'color:#c60' }, _('не задана — добавь "vk_link" в JSON списка')));
 		var settings = E('div', { 'class': 'cbi-section' }, [
 			E('h3', {}, _('Настройки')),
 			E('div', { 'class': 'cbi-value' }, [
@@ -104,18 +104,17 @@ return view.extend({
 			]),
 			E('div', { 'class': 'cbi-value' }, [
 				E('label', { 'class': 'cbi-value-title' }, _('Ссылка на звонок VK')),
-				E('div', { 'class': 'cbi-value-field' }, [ vkInput,
+				E('div', { 'class': 'cbi-value-field' }, [ vkNote,
 					E('div', { 'class': 'cbi-value-description' },
-						_('Нужна vk-turn client для получения TURN-кредов. Оставь пустым, чтобы не менять.')) ])
+						_('Берётся автоматически из списка серверов (поле "vk_link"), задавать вручную не нужно.')) ])
 			]),
 			E('div', { 'class': 'cbi-value' }, [
 				E('div', { 'class': 'cbi-value-field' }, [
 					E('button', {
 						'class': 'btn cbi-button cbi-button-save',
 						'click': ui.createHandlerFn(self, function () {
-							return rpcSetUrl(urlInput.value || '', vkInput.value || '').then(function () {
+							return rpcSetUrl(urlInput.value || '', '').then(function () {
 								ui.addNotification(null, _('Сохранено. Обновляю список…'), 'info');
-								vkInput.value = '';
 								return self.reloadInto(document.getElementById('orange-root'));
 							});
 						})
@@ -206,7 +205,7 @@ return view.extend({
 		var root = E('div', { id: 'orange-root' }, self.renderBody(data));
 		return E('div', {}, [
 			E('style', {}, '.orange-best td{background:rgba(0,136,0,0.08)}'),
-			E('h2', {}, 'OrangeVPN'),
+			E('h2', {}, [ 'OrangeVPN ', E('small', { style: 'color:#888;font-weight:400' }, 'v3') ]),
 			E('p', {}, _('Список серверов пингуется; лучший (минимальный пинг) отмечен ★. Нажми «Подключить», чтобы завести коннект в интерфейс OrangeVPN.')),
 			root
 		]);

@@ -49,7 +49,10 @@ m_list() {
 	json_init
 	json_add_string "url" "$(url_get)"
 	json_add_boolean "has_url" "$([ -n "$(url_get)" ] && echo 1 || echo 0)"
-	json_add_boolean "has_vk_link" "$([ -n "$(vklink_get)" ] && echo 1 || echo 0)"
+	# vk_link приходит из списка серверов; локальный uci — запасной
+	_vl="$(jf '@.vk_link')"; [ -n "$_vl" ] || _vl="$(vklink_get)"
+	json_add_boolean "has_vk_link" "$([ -n "$_vl" ] && echo 1 || echo 0)"
+	json_add_boolean "vk_link_from_list" "$([ -n "$(jf '@.vk_link')" ] && echo 1 || echo 0)"
 	json_add_string "active_host" "$ACT"
 	json_add_array "servers"
 	if [ -n "$JSON" ]; then
@@ -151,7 +154,10 @@ EOF
 	mkdir -p "$(dirname "$VKCONF")"
 	[ -f "$VKCONF" ] || printf 'PEER=""\nLISTEN="127.0.0.1:9000"\nTHREADS="4"\nLINK_ARG=""\nEXTRA=""\n' > "$VKCONF"
 	sed -i "s|^PEER=.*|PEER=\"${host}:${pport}\"|" "$VKCONF"
-	vl="$(vklink_get)"
+	# ссылка на звонок VK: приоритет — из списка серверов (централизованно),
+	# локальный uci используется только как запасной вариант
+	vl="$(jf '@.vk_link')"
+	[ -n "$vl" ] || vl="$(vklink_get)"
 	[ -n "$vl" ] && sed -i "s|^LINK_ARG=.*|LINK_ARG=\"-vk-link ${vl}\"|" "$VKCONF"
 
 	# ---- применить ----
