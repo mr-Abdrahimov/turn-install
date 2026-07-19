@@ -392,8 +392,30 @@ AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOF
 
+  # ---- запись для списка серверов OrangeVPN (LuCI-плагин) ----
+  local entry="/root/orangevpn-entry.json"
+  cat > "$entry" <<EOF
+{
+  "name": "$(hostname) (${pubip})",
+  "host": "${pubip}",
+  "awg": {
+    "private_key": "${cpriv}",
+    "address": "${cip}/24",
+    "mtu": 1280,
+    "jc": ${JC}, "jmin": ${JMIN}, "jmax": ${JMAX},
+    "s1": ${S1}, "s2": ${S2}, "s3": 0, "s4": 0,
+    "h1": ${H1}, "h2": ${H2}, "h3": ${H3}, "h4": ${H4},
+    "peer_public_key": "${SRV_PUB}",
+    "preshared_key": "${cpsk}",
+    "keepalive": 25
+  }
+}
+EOF
+  chmod 600 "$entry"
+
   echo
   log "Клиентский AmneziaWG-конфиг сохранён: ${out}"
+  log "Запись для списка OrangeVPN:          ${entry}"
   echo "----------------------------------------------------------------------"
   printf "  Публичный IP сервера : ${c_grn}%s${c_rst}\n" "$pubip"
   printf "  Порт vk-turn (proxy) : ${c_grn}%s${c_rst}\n" "$PROXY_PORT"

@@ -1,0 +1,4 @@
+# артефакты сборки (собираются build-client.sh / orangevpn/build-run.sh)
+build/
+orangevpn/*.run
+config.env

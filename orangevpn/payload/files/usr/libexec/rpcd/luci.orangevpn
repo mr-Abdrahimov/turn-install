@@ -1,0 +1,221 @@
+#!/bin/sh
+# rpcd-бэкенд OrangeVPN (ubus-объект luci.orangevpn).
+# Методы: list, ping, connect, status, seturl.
+# Список серверов берётся с URL (uci orangevpn.settings.url) в формате:
+#   { "proxy_port":56000, "vk_link":"https://vk.ru/call/join/...(опц.)",
+#     "servers":[ { "name":"NL", "host":"1.2.3.4",
+#                   "awg":{ "private_key","address","mtu","jc","jmin","jmax",
+#                           "s1","s2","s3","s4","h1","h2","h3","h4",
+#                           "peer_public_key","preshared_key","keepalive" } } ] }
+. /usr/share/libubox/jshn.sh
+
+IFACE="OrangeVPN"
+PEERTYPE="amneziawg_${IFACE}"
+VKCONF="/etc/vkturn/vkturn.conf"
+DEF_PROXY_PORT="56000"
+
+url_get()      { uci -q get orangevpn.settings.url; }
+vklink_get()   { uci -q get orangevpn.settings.vk_link; }
+router_ip()    { uci -q get network.lan.ipaddr || echo "192.168.1.1"; }
+
+# скачать URL в stdout (https через curl; фолбэки)
+fetch() {
+	u="$1"
+	[ -n "$u" ] || return 1
+	if command -v curl >/dev/null 2>&1;          then curl -fsSL --max-time 15 "$u" && return 0; fi
+	if command -v uclient-fetch >/dev/null 2>&1;  then uclient-fetch -qO- --timeout=15 "$u" && return 0; fi
+	if command -v wget >/dev/null 2>&1;           then wget -qO- "$u" && return 0; fi
+	return 1
+}
+
+jf() { jsonfilter -s "$JSON" -e "$1" 2>/dev/null; }         # выбрать из кэша $JSON
+
+# активный сервер = host из PEER в конфиге vk-turn client
+active_host() {
+	[ -f "$VKCONF" ] || return 0
+	peer="$(sed -n 's/^PEER="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$VKCONF" | head -1)"
+	echo "${peer%%:*}"
+}
+
+captcha_pending() {
+	{ netstat -lnt 2>/dev/null || ss -lnt 2>/dev/null; } | grep -q ":8765" && echo 1 || echo 0
+}
+
+# ---------- методы ----------
+
+m_list() {
+	JSON="$(fetch "$(url_get)")"
+	ACT="$(active_host)"
+	json_init
+	json_add_string "url" "$(url_get)"
+	json_add_boolean "has_url" "$([ -n "$(url_get)" ] && echo 1 || echo 0)"
+	json_add_boolean "has_vk_link" "$([ -n "$(vklink_get)" ] && echo 1 || echo 0)"
+	json_add_string "active_host" "$ACT"
+	json_add_array "servers"
+	if [ -n "$JSON" ]; then
+		i=0
+		while :; do
+			host="$(jf "@.servers[$i].host")"
+			[ -z "$host" ] && break
+			name="$(jf "@.servers[$i].name")"
+			[ -n "$name" ] || name="$host"
+			json_add_object ""
+			json_add_int    "index" "$i"
+			json_add_string "name"  "$name"
+			json_add_string "host"  "$host"
+			json_add_boolean "active" "$([ "$host" = "$ACT" ] && echo 1 || echo 0)"
+			json_close_object
+			i=$((i+1))
+		done
+	fi
+	json_close_array
+	json_dump
+}
+
+m_ping() {
+	host="$1"
+	json_init
+	if [ -n "$host" ]; then
+		rtt="$(ping -c 3 -W 2 -q "$host" 2>/dev/null | awk -F'= ' '/min\/avg\/max/{split($2,a,"/"); printf "%.0f", a[2]; exit}')"
+		if [ -n "$rtt" ]; then json_add_int "rtt" "$rtt"; else json_add_string "rtt" ""; fi
+	else
+		json_add_string "rtt" ""
+	fi
+	json_dump
+}
+
+m_connect() {
+	idx="$1"
+	json_init
+	JSON="$(fetch "$(url_get)")"
+	host="$(jf "@.servers[$idx].host")"
+	if [ -z "$JSON" ] || [ -z "$host" ]; then
+		json_add_boolean "result" 0
+		json_add_string  "error" "сервер не найден (проверь URL списка)"
+		json_dump; return
+	fi
+	pport="$(jf "@.proxy_port")"; [ -n "$pport" ] || pport="$DEF_PROXY_PORT"
+
+	priv="$(jf "@.servers[$idx].awg.private_key")"
+	addr="$(jf "@.servers[$idx].awg.address")";  [ -n "$addr" ] || addr="10.8.1.2/24"
+	mtu="$(jf "@.servers[$idx].awg.mtu")";        [ -n "$mtu" ]  || mtu="1280"
+	ppub="$(jf "@.servers[$idx].awg.peer_public_key")"
+	psk="$(jf "@.servers[$idx].awg.preshared_key")"
+	ka="$(jf "@.servers[$idx].awg.keepalive")";   [ -n "$ka" ]   || ka="25"
+
+	# обфускация (если поля нет — 0)
+	for p in jc jmin jmax s1 s2 s3 s4 h1 h2 h3 h4; do
+		eval "v_$p=\"\$(jf '@.servers[$idx].awg.$p')\""
+		eval "[ -n \"\$v_$p\" ] || v_$p=0"
+	done
+
+	# ---- интерфейс OrangeVPN (create-or-update) ----
+	uci -q batch <<EOF
+set network.${IFACE}=interface
+set network.${IFACE}.proto='amneziawg'
+set network.${IFACE}.private_key='${priv}'
+set network.${IFACE}.mtu='${mtu}'
+set network.${IFACE}.nohostroute='1'
+set network.${IFACE}.auto='1'
+set network.${IFACE}.awg_jc='${v_jc}'
+set network.${IFACE}.awg_jmin='${v_jmin}'
+set network.${IFACE}.awg_jmax='${v_jmax}'
+set network.${IFACE}.awg_s1='${v_s1}'
+set network.${IFACE}.awg_s2='${v_s2}'
+set network.${IFACE}.awg_s3='${v_s3}'
+set network.${IFACE}.awg_s4='${v_s4}'
+set network.${IFACE}.awg_h1='${v_h1}'
+set network.${IFACE}.awg_h2='${v_h2}'
+set network.${IFACE}.awg_h3='${v_h3}'
+set network.${IFACE}.awg_h4='${v_h4}'
+delete network.${IFACE}.addresses
+EOF
+	uci add_list network.${IFACE}.addresses="$addr"
+
+	# ---- peer (endpoint = локальный vk-turn client 127.0.0.1:9000!) ----
+	while uci -q delete "network.@${PEERTYPE}[0]"; do :; done
+	P="$(uci add network "$PEERTYPE")"
+	uci -q batch <<EOF
+set network.${P}.public_key='${ppub}'
+set network.${P}.endpoint_host='127.0.0.1'
+set network.${P}.endpoint_port='9000'
+set network.${P}.persistent_keepalive='${ka}'
+set network.${P}.route_allowed_ips='0'
+delete network.${P}.allowed_ips
+EOF
+	[ -n "$psk" ] && uci set network.${P}.preshared_key="$psk"
+	uci add_list network.${P}.allowed_ips='0.0.0.0/0'
+	uci commit network
+
+	# ---- нацелить vk-turn client на выбранный сервер (сохранив vk-link) ----
+	mkdir -p "$(dirname "$VKCONF")"
+	[ -f "$VKCONF" ] || printf 'PEER=""\nLISTEN="127.0.0.1:9000"\nTHREADS="4"\nLINK_ARG=""\nEXTRA=""\n' > "$VKCONF"
+	sed -i "s|^PEER=.*|PEER=\"${host}:${pport}\"|" "$VKCONF"
+	vl="$(vklink_get)"
+	[ -n "$vl" ] && sed -i "s|^LINK_ARG=.*|LINK_ARG=\"-vk-link ${vl}\"|" "$VKCONF"
+
+	# ---- применить ----
+	/etc/init.d/vkturn restart >/dev/null 2>&1
+	ifdown "$IFACE" >/dev/null 2>&1
+	ifup "$IFACE" >/dev/null 2>&1
+
+	json_add_boolean "result" 1
+	json_add_string  "host" "$host"
+	json_add_boolean "captcha" "$(captcha_pending)"
+	json_add_string  "captcha_url" "https://$(router_ip):8765"
+	json_dump
+}
+
+m_status() {
+	json_init
+	hs="$(awg show ${IFACE} latest-handshakes 2>/dev/null | awk '{print $2; exit}')"
+	rx="$(awg show ${IFACE} transfer 2>/dev/null | awk '{print $2; exit}')"
+	now="$(date +%s)"
+	up=0
+	if [ -n "$hs" ] && [ "$hs" -gt 0 ] 2>/dev/null; then
+		age=$(( now - hs ))
+		[ "$age" -lt 200 ] && up=1
+		json_add_int "handshake_age" "$age"
+	else
+		json_add_int "handshake_age" -1
+	fi
+	json_add_boolean "up" "$up"
+	json_add_string  "active_host" "$(active_host)"
+	json_add_boolean "captcha_pending" "$(captcha_pending)"
+	json_add_string  "captcha_url" "https://$(router_ip):8765"
+	json_add_boolean "client_running" "$(pgrep -f /usr/sbin/vkturn-client >/dev/null 2>&1 && echo 1 || echo 0)"
+	json_dump
+}
+
+m_seturl() {
+	uci -q get orangevpn.settings >/dev/null 2>&1 || { uci set orangevpn.settings=settings; }
+	[ -n "$1" ] && uci set orangevpn.settings.url="$1"
+	[ -n "$2" ] && uci set orangevpn.settings.vk_link="$2"
+	uci commit orangevpn
+	json_init; json_add_boolean "result" 1; json_dump
+}
+
+# ---------- диспетчер ----------
+case "$1" in
+	list)
+		json_init
+		json_add_object "list";    json_close_object
+		json_add_object "ping";    json_add_string "host" "";   json_close_object
+		json_add_object "connect"; json_add_string "index" "";  json_close_object
+		json_add_object "status";  json_close_object
+		json_add_object "seturl";  json_add_string "url" "";  json_add_string "vk_link" ""; json_close_object
+		json_dump
+		;;
+	call)
+		read -r input; json_load "$input" 2>/dev/null
+		case "$2" in
+			list)    m_list ;;
+			ping)    json_get_var host host;   m_ping "$host" ;;
+			connect) json_get_var index index; m_connect "$index" ;;
+			status)  m_status ;;
+			seturl)  json_get_var url url; json_get_var vk_link vk_link; m_seturl "$url" "$vk_link" ;;
+			*)       json_init; json_dump ;;
+		esac
+		;;
+esac
+exit 0

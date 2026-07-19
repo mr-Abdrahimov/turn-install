@@ -1,0 +1,17 @@
+{
+	"luci-app-orangevpn": {
+		"description": "Grant access to OrangeVPN procedures",
+		"read": {
+			"ubus": {
+				"luci.orangevpn": [ "list", "ping", "status" ]
+			},
+			"uci": [ "orangevpn", "network" ]
+		},
+		"write": {
+			"ubus": {
+				"luci.orangevpn": [ "connect", "seturl" ]
+			},
+			"uci": [ "orangevpn", "network" ]
+		}
+	}
+}

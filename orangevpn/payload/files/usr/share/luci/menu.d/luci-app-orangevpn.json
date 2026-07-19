@@ -1,0 +1,13 @@
+{
+	"admin/vpn/orangevpn": {
+		"title": "OrangeVPN",
+		"order": 90,
+		"action": {
+			"type": "view",
+			"path": "orangevpn/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-orangevpn" ]
+		}
+	}
+}
