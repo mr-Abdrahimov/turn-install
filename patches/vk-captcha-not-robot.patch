@@ -1,0 +1,45 @@
+diff --git a/client/main.go b/client/main.go
+index 73dfd17..e5e7147 100644
+--- a/client/main.go
++++ b/client/main.go
+@@ -302,23 +302,22 @@ func ParseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
+ 		return nil
+ 	}
+ 
+-	// Extract captcha_sid
++	// Extract captcha_sid (legacy image-captcha field; VK's new not_robot/redirect_uri
++	// flow omits it. Do NOT bail when absent — the slider/auto solver only needs
++	// redirect_uri + session_token.)
+ 	captchaSid, ok := errData["captcha_sid"].(string)
+ 	if !ok {
+-		// try numeric
+ 		if sidNum, ok2 := errData["captcha_sid"].(float64); ok2 {
+ 			captchaSid = fmt.Sprintf("%.0f", sidNum)
+ 		} else {
+-			log.Printf("missing captcha_sid in captcha error data")
+-			return nil
++			captchaSid = ""
+ 		}
+ 	}
+ 
+-	// Extract captcha_img
++	// Extract captcha_img (legacy; absent in new not_robot flow — optional)
+ 	captchaImg, ok := errData["captcha_img"].(string)
+ 	if !ok {
+-		log.Printf("missing captcha_img in captcha error data")
+-		return nil
++		captchaImg = ""
+ 	}
+ 
+ 	// Extract error_msg
+@@ -956,7 +955,9 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
+ 					}
+ 				case captchaSolveModeManual:
+ 					log.Printf("[STREAM %d] [Captcha] Triggering manual captcha fallback...", streamID)
+-					manualCtx, manualCancel := context.WithTimeout(ctx, 60*time.Second)
++					// Raised 60s -> 600s: headless router needs time for the operator to
++					// open http://localhost:8765 via `ssh -L 8765:localhost:8765` and solve.
++					manualCtx, manualCancel := context.WithTimeout(ctx, 600*time.Second)
+ 
+ 					type manualRes struct {
+ 						token string

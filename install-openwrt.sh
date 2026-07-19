@@ -254,4 +254,11 @@ cat <<EOF
 ВАЖНО: включай туннель ТОЛЬКО после 'Established DTLS connection!'.
 Если хендшейк AmneziaWG не проходит — переустанови с флагом --udp.
 Подробности: docs/openwrt-amneziawg.md
+
+*** КАПЧА VK ***
+Этот бинарник — релизный (v1.8.3) и НЕ проходит новую капчу VK «Я Не Робот»
+(в логах: 'missing captcha_sid' по кругу). Нужен ПРОПАТЧЕННЫЙ клиент:
+собери его через build-client.sh и подмени /usr/sbin/vkturn-client.
+Капчу всё равно придётся решать вручную через браузер (ssh -L 8765:localhost:8765).
+Подробности: docs/captcha-manual.md
 EOF

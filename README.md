@@ -12,6 +12,13 @@ VK / Яндекс Телемост**. Пакеты оборачиваются в
 > приватности на **своих** серверах и со **своими** звонковыми ссылками. Upstream помечает
 > проект «только для учебных целей». Соблюдай законы своей юрисдикции.
 
+> 🔴 **Важно про капчу VK.** Релизный клиент (v1.8.3) НЕ проходит новую капчу VK «Я Не Робот».
+> Нужен **пропатченный** клиент (`build-client.sh`, патч `patches/vk-captcha-not-robot.patch`), и
+> даже с ним капча решается **вручную через браузер** при каждой (пере)авторизации — полностью
+> автоматического headless-режима сейчас нет. См. **[docs/captcha-manual.md](docs/captcha-manual.md)**.
+> Проверено на живом стенде: сервер Ubuntu 24.04 + роутер OpenWrt (aarch64) — сквозной туннель
+> поднимается, внешний IP через туннель = IP сервера.
+
 ## Архитектура
 
 ```
@@ -79,8 +86,11 @@ sh install-openwrt.sh \
 |------|-----------|
 | [`install-server.sh`](install-server.sh) | сервер: AmneziaWG + vk-turn server + systemd + firewall |
 | [`install-openwrt.sh`](install-openwrt.sh) | роутер: vk-turn client + procd + route-guard |
+| [`build-client.sh`](build-client.sh) | собрать пропатченный клиент (обход бага капчи) из исходников |
+| [`patches/vk-captcha-not-robot.patch`](patches/vk-captcha-not-robot.patch) | фикс парсера капчи + таймаут ручного режима |
 | [`uninstall-server.sh`](uninstall-server.sh) | удаление серверной части (`--purge-awg` — вместе с AWG) |
 | [`docs/openwrt-amneziawg.md`](docs/openwrt-amneziawg.md) | как связать AmneziaWG на OpenWrt с транспортом |
+| [`docs/captcha-manual.md`](docs/captcha-manual.md) | обход капчи VK «Я Не Робот» вручную через браузер |
 
 ## Управление
 
