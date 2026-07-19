@@ -56,20 +56,11 @@ build_one(){ # <goarch> <client|server>
       go build -trimpath -ldflags="-s -w" -o "$OUT/$name" "./$comp" )
 }
 
-build_gw(){ # <goarch>  — LAN-шлюз капчи (исходник в этом репо)
-  local ga="$1" gomips="" name="captcha-lan-gw-linux-$1"
-  case "$ga" in mips|mipsle) gomips="softfloat" ;; esac
-  [ -d "$HERE/captcha-lan-gw" ] || return 0
-  log "Сборка $name (LAN-шлюз капчи)…"
-  ( cd "$HERE/captcha-lan-gw" && CGO_ENABLED=0 GOOS=linux GOARCH="$ga" ${gomips:+GOMIPS=$gomips} \
-      go build -trimpath -ldflags="-s -w" -o "$OUT/$name" . )
-}
-
 for ga in $ARCHES; do
   case "$WHAT" in
-    client) build_one "$ga" client; build_gw "$ga" ;;
+    client) build_one "$ga" client ;;
     server) build_one "$ga" server ;;
-    both)   build_one "$ga" client; build_one "$ga" server; build_gw "$ga" ;;
+    both)   build_one "$ga" client; build_one "$ga" server ;;
     *) err "Второй аргумент: client | server | both" ;;
   esac
 done

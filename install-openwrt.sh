@@ -248,39 +248,13 @@ esac
 MGR
 chmod +x /usr/sbin/vkturn
 
-# ---- LAN-шлюз капчи (опционально) --------------------------------------------
-# Если рядом лежит бинарник captcha-lan-gw (собран build-client.sh) — ставим сервис,
-# чтобы капчу можно было решать через http://<ip-роутера>:8766 без ssh -L.
-GW_SRC=""
-for c in "$_HERE/captcha-lan-gw-linux-$ARCH" "$_HERE/build/captcha-lan-gw-linux-$ARCH" "$_HERE/captcha-lan-gw"; do
-  [ -f "$c" ] && { GW_SRC="$c"; break; }
-done
-if [ -n "$GW_SRC" ]; then
-  cp "$GW_SRC" /usr/sbin/vkturn-captcha-gw && chmod +x /usr/sbin/vkturn-captcha-gw
-  cat > /etc/init.d/vkturn-captcha-gw <<'GWINIT'
-#!/bin/sh /etc/rc.common
-# LAN-шлюз страницы капчи vk-turn: http://<ip-роутера>:8766 -> 127.0.0.1:8765
-START=96
-STOP=10
-USE_PROCD=1
-start_service() {
-  procd_open_instance
-  procd_set_param command /usr/sbin/vkturn-captcha-gw
-  procd_set_param env LISTEN=0.0.0.0:8766 UPSTREAM=http://127.0.0.1:8765
-  procd_set_param respawn 3600 5 0
-  procd_set_param stdout 1
-  procd_set_param stderr 1
-  procd_close_instance
-}
-GWINIT
-  chmod +x /etc/init.d/vkturn-captcha-gw
-  /etc/init.d/vkturn-captcha-gw enable >/dev/null 2>&1 || true
-  /etc/init.d/vkturn-captcha-gw restart >/dev/null 2>&1 || true
-  log "LAN-шлюз капчи установлен: реши капчу по http://<ip-роутера>:8766"
-else
-  warn "Бинарник captcha-lan-gw не найден рядом — LAN-страница капчи не установлена."
-  warn "Собери его: ./build-client.sh ${ARCH}  (появится build/captcha-lan-gw-linux-${ARCH})"
-fi
+# ---- LAN-капча ---------------------------------------------------------------
+# Пропатченный клиент отдаёт страницу капчи по HTTPS прямо на 0.0.0.0:8765
+# (самоподписанный сертификат). Решать капчу: открыть https://<ip-роутера>:8765,
+# принять предупреждение о сертификате, пройти чекбокс. HTTPS обязателен: страница
+# использует crypto.subtle (PoW), доступный только в secure context — http по LAN
+# им не является, а https (даже самоподписанный) — является. Отдельный шлюз не нужен.
+log "Капчу решать по https://<ip-роутера>:8765 (принять самоподписанный серт)"
 
 # ---- watchdog: авто-восстановление туннеля (напр. после reload zeroblock) ----
 AWG_IFACE="${AWG_IFACE:-VKTURN}"
@@ -305,13 +279,13 @@ while :; do
     [ "\$FAILS" -gt 0 ] && LOG "туннель восстановлен"; FAILS=0; sleep "\$POLL_OK"; continue
   fi
   if captcha_pending; then
-    LOG "туннель down: ждёт КАПЧУ — открой http://\$(lan_ip):8766"; FAILS=0; sleep "\$POLL_BAD"; continue
+    LOG "туннель down: ждёт КАПЧУ — открой https://\$(lan_ip):8765"; FAILS=0; sleep "\$POLL_BAD"; continue
   fi
   FAILS=\$((FAILS+1)); LOG "туннель down (fail #\$FAILS) — восстанавливаю"
   client_running || { LOG "client не запущен -> старт"; /etc/init.d/vkturn start 2>/dev/null; sleep 8; }
   ifup "\$IFACE" 2>/dev/null
   if [ "\$FAILS" -ge "\$HARD_AFTER" ] && client_running && ! captcha_pending; then
-    LOG "долгий обрыв -> перезапуск клиента (может нужна капча http://\$(lan_ip):8766)"
+    LOG "долгий обрыв -> перезапуск клиента (может нужна капча https://\$(lan_ip):8765)"
     /etc/init.d/vkturn restart 2>/dev/null; FAILS=0
   fi
   sleep "\$POLL_BAD"

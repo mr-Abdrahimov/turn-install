@@ -57,3 +57,157 @@ index 73dfd17..b5bc77c 100644
  
  					type manualRes struct {
  						token string
+diff --git a/client/manual_captcha.go b/client/manual_captcha.go
+index 826478c..3e36919 100644
+--- a/client/manual_captcha.go
++++ b/client/manual_captcha.go
+@@ -4,6 +4,7 @@ import (
+ 	"bytes"
+ 	"compress/gzip"
+ 	"context"
++	"crypto/tls"
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
+@@ -16,26 +17,55 @@ import (
+ 	"os/exec"
+ 	"runtime"
+ 	"strings"
++	"sync"
+ 	"time"
+ 
+ 	"github.com/bschaatsbergen/dnsdialer"
++	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
+ )
+ 
+ const captchaListenPort = "8765"
+ 
++// ключ context для проброса host браузера из Rewrite в ModifyResponse
++type browserHostCtxKey struct{}
++
+ type browserCommand struct {
+ 	name string
+ 	args []string
+ }
+ 
+ func localCaptchaOrigin() string {
+-	return "http://localhost:" + captchaListenPort
++	// HTTPS: страница капчи использует crypto.subtle (PoW), доступный ТОЛЬКО в secure
++	// context. http://localhost браузер считает secure, а http://<ip-роутера> — нет.
++	// Поэтому отдаём по HTTPS (самоподписанный сертификат) — тогда и по LAN-IP secure context.
++	return "https://localhost:" + captchaListenPort
++}
++
++var (
++	captchaTLSOnce sync.Once
++	captchaTLSCfg  *tls.Config
++)
++
++// captchaTLSConfig возвращает TLS-конфиг с самоподписанным сертификатом (генерируется 1 раз).
++func captchaTLSConfig() *tls.Config {
++	captchaTLSOnce.Do(func() {
++		cert, err := selfsign.GenerateSelfSigned()
++		if err != nil {
++			log.Printf("[Captcha] self-signed cert error: %v", err)
++			return
++		}
++		captchaTLSCfg = &tls.Config{Certificates: []tls.Certificate{cert}}
++	})
++	return captchaTLSCfg
+ }
+ 
+ func localCaptchaListenAddrs() []string {
++	// Слушаем все интерфейсы, чтобы страницу капчи можно было открыть по LAN-адресу
++	// роутера (http://<ip>:8765) без ssh-проброса. На роутере порт закрыт от WAN
++	// штатным firewall (wan input REJECT), доступен только из LAN.
+ 	return []string{
+-		"127.0.0.1:" + captchaListenPort,
+-		"[::1]:" + captchaListenPort,
++		"0.0.0.0:" + captchaListenPort,
++		"[::]:" + captchaListenPort,
+ 	}
+ }
+ 
+@@ -53,13 +83,15 @@ func isLocalCaptchaHost(host string) bool {
+ 			return true
+ 		}
+ 	}
+-	return false
++	// Принимаем и доступ по LAN-адресу роутера (<ip>:8765), не только localhost —
++	// чтобы Origin/Referer корректно распознавались как локальные и переписывались для VK.
++	return strings.HasSuffix(host, ":"+captchaListenPort)
+ }
+ 
+ func localCaptchaURLForTarget(targetURL *neturl.URL) string {
++	// Возвращаем ОТНОСИТЕЛЬНЫЙ путь (без хоста): редиректы/ссылки резолвятся в origin
++	// браузера — работает и с localhost (ssh -L), и с LAN-адреса роутера.
+ 	localURL := &neturl.URL{
+-		Scheme:   "http",
+-		Host:     "localhost:" + captchaListenPort,
+ 		Path:     targetURL.Path,
+ 		RawPath:  targetURL.RawPath,
+ 		RawQuery: targetURL.RawQuery,
+@@ -108,7 +140,7 @@ func rewriteProxyHeaderURL(raw string, targetURL *neturl.URL) string {
+ 	if err != nil {
+ 		return raw
+ 	}
+-	if parsed.Scheme != "http" || !isLocalCaptchaHost(parsed.Host) {
++	if (parsed.Scheme != "http" && parsed.Scheme != "https") || !isLocalCaptchaHost(parsed.Host) {
+ 		return raw
+ 	}
+ 	parsed.Scheme = targetURL.Scheme
+@@ -164,8 +196,14 @@ func rewriteProxyCookies(header http.Header) {
+ 	}
+ }
+ 
+-func rewriteCaptchaHTML(html string, targetURL *neturl.URL) string {
++func rewriteCaptchaHTML(html string, targetURL *neturl.URL, browserHost string) string {
++	// localOrigin = абсолютный origin ТОГО хоста, по которому зашёл браузер
++	// (localhost:8765 через ssh -L ИЛИ <ip-роутера>:8765 напрямую по LAN).
++	// Так URL VKID-виджета остаются абсолютными и рабочими, а не пустыми/чужими.
+ 	localOrigin := localCaptchaOrigin()
++	if browserHost != "" {
++		localOrigin = "https://" + browserHost
++	}
+ 	upstreamOrigin := targetOrigin(targetURL)
+ 	html = strings.ReplaceAll(html, upstreamOrigin, localOrigin)
+ 
+@@ -354,12 +392,16 @@ func startCaptchaServer(srv *http.Server, logPrefix string) error {
+ 	var listenErrs []string
+ 	var listening bool
+ 
++	tlsCfg := captchaTLSConfig()
+ 	for _, addr := range localCaptchaListenAddrs() {
+ 		listener, err := net.Listen("tcp", addr)
+ 		if err != nil {
+ 			listenErrs = append(listenErrs, fmt.Sprintf("%s (%v)", addr, err))
+ 			continue
+ 		}
++		if tlsCfg != nil {
++			listener = tls.NewListener(listener, tlsCfg) // HTTPS для secure context
++		}
+ 		listening = true
+ 		go func(listener net.Listener) {
+ 			if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+@@ -456,7 +498,11 @@ func solveCaptchaViaProxy(redirectURI string, dialer *dnsdialer.Dialer) (string,
+ 	proxy := &httputil.ReverseProxy{
+ 		Transport: transport,
+ 		Rewrite: func(req *httputil.ProxyRequest) {
++			browserHost := req.In.Host
+ 			rewriteProxyRequest(req.Out, targetURL)
++			// пробрасываем host, по которому зашёл браузер, в ModifyResponse через context
++			// (не уходит в VK, в отличие от заголовка)
++			req.Out = req.Out.WithContext(context.WithValue(req.Out.Context(), browserHostCtxKey{}, browserHost))
+ 		},
+ 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+ 			log.Printf("[Captcha Proxy] ERROR for %s %s: %v", r.Method, r.URL.String(), err)
+@@ -531,7 +577,8 @@ func solveCaptchaViaProxy(redirectURI string, dialer *dnsdialer.Dialer) (string,
+ 					res.Header.Del(headerName)
+ 				}
+ 
+-				bodyBytes = []byte(rewriteCaptchaHTML(string(bodyBytes), targetURL))
++				browserHost, _ := res.Request.Context().Value(browserHostCtxKey{}).(string)
++				bodyBytes = []byte(rewriteCaptchaHTML(string(bodyBytes), targetURL, browserHost))
+ 				res.Header.Del("Content-Encoding")
+ 			}
+ 
