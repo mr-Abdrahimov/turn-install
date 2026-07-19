@@ -248,6 +248,40 @@ esac
 MGR
 chmod +x /usr/sbin/vkturn
 
+# ---- LAN-шлюз капчи (опционально) --------------------------------------------
+# Если рядом лежит бинарник captcha-lan-gw (собран build-client.sh) — ставим сервис,
+# чтобы капчу можно было решать через http://<ip-роутера>:8766 без ssh -L.
+GW_SRC=""
+for c in "$_HERE/captcha-lan-gw-linux-$ARCH" "$_HERE/build/captcha-lan-gw-linux-$ARCH" "$_HERE/captcha-lan-gw"; do
+  [ -f "$c" ] && { GW_SRC="$c"; break; }
+done
+if [ -n "$GW_SRC" ]; then
+  cp "$GW_SRC" /usr/sbin/vkturn-captcha-gw && chmod +x /usr/sbin/vkturn-captcha-gw
+  cat > /etc/init.d/vkturn-captcha-gw <<'GWINIT'
+#!/bin/sh /etc/rc.common
+# LAN-шлюз страницы капчи vk-turn: http://<ip-роутера>:8766 -> 127.0.0.1:8765
+START=96
+STOP=10
+USE_PROCD=1
+start_service() {
+  procd_open_instance
+  procd_set_param command /usr/sbin/vkturn-captcha-gw
+  procd_set_param env LISTEN=0.0.0.0:8766 UPSTREAM=http://127.0.0.1:8765
+  procd_set_param respawn 3600 5 0
+  procd_set_param stdout 1
+  procd_set_param stderr 1
+  procd_close_instance
+}
+GWINIT
+  chmod +x /etc/init.d/vkturn-captcha-gw
+  /etc/init.d/vkturn-captcha-gw enable >/dev/null 2>&1 || true
+  /etc/init.d/vkturn-captcha-gw restart >/dev/null 2>&1 || true
+  log "LAN-шлюз капчи установлен: реши капчу по http://<ip-роутера>:8766"
+else
+  warn "Бинарник captcha-lan-gw не найден рядом — LAN-страница капчи не установлена."
+  warn "Собери его: ./build-client.sh ${ARCH}  (появится build/captcha-lan-gw-linux-${ARCH})"
+fi
+
 # ---- запуск ------------------------------------------------------------------
 /etc/init.d/vkturn enable  >/dev/null 2>&1 || true
 /etc/init.d/vkturn restart
