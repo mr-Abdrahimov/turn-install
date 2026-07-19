@@ -6,12 +6,6 @@
 'require poll';
 'require dom';
 
-var callList = rpc.declare({
-	object: 'luci.orangevpn',
-	method: 'list',
-	expect: { servers: [] },
-	filter: function (data) { return data; }
-});
 var rpcList = rpc.declare({ object: 'luci.orangevpn', method: 'list' });
 var rpcPing = rpc.declare({ object: 'luci.orangevpn', method: 'ping', params: ['host'], expect: { rtt: '' } });
 var rpcConnect = rpc.declare({ object: 'luci.orangevpn', method: 'connect', params: ['index'] });
@@ -31,8 +25,10 @@ return view.extend({
 		var self = this;
 		var hosts = Object.keys(rows);
 		return Promise.all(hosts.map(function (h) {
-			return L.resolveDefault(rpcPing(h), { rtt: '' }).then(function (r) {
-				rows[h].rtt = (r && r.rtt !== '' && r.rtt != null) ? parseInt(r.rtt) : null;
+			// ВНИМАНИЕ: из-за expect:{rtt:''} rpc возвращает САМО значение rtt, а не объект
+			return L.resolveDefault(rpcPing(h), null).then(function (r) {
+				var v = (r === '' || r == null) ? NaN : parseInt(r, 10);
+				rows[h].rtt = isNaN(v) ? null : v;
 			});
 		})).then(function () {
 			// найти минимальный валидный пинг
