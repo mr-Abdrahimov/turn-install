@@ -1,5 +1,5 @@
 diff --git a/client/main.go b/client/main.go
-index 73dfd17..e5e7147 100644
+index 73dfd17..b5bc77c 100644
 --- a/client/main.go
 +++ b/client/main.go
 @@ -302,23 +302,22 @@ func ParseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
@@ -32,7 +32,21 @@ index 73dfd17..e5e7147 100644
  	}
  
  	// Extract error_msg
-@@ -956,7 +955,9 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
+@@ -618,7 +617,12 @@ type StreamCredentialsCache struct {
+ }
+ 
+ const (
+-	credentialLifetime = 10 * time.Minute
++	// Было 10 минут: клиент проактивно переавторизовывался каждые ~9 мин, а каждая
++	// переавторизация в VK упирается в капчу «Я Не Робот». Держим креды долго и
++	// переавторизуемся ТОЛЬКО когда VK реально их отвергнет (isAuthError -> handleAuthError
++	// инвалидирует кэш). Так переподключения после сетевых микрообрывов переиспользуют
++	// креды без капчи — резко меньше простоев.
++	credentialLifetime = 24 * time.Hour
+ 	cacheSafetyMargin  = 60 * time.Second
+ 	maxCacheErrors     = 3
+ 	errorWindow        = 10 * time.Second
+@@ -956,7 +960,9 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
  					}
  				case captchaSolveModeManual:
  					log.Printf("[STREAM %d] [Captcha] Triggering manual captcha fallback...", streamID)

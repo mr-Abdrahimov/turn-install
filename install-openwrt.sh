@@ -46,6 +46,18 @@ usage() {
 EOF
 }
 
+# читаем config.env рядом со скриптом (если есть). Из него берём SERVER_IP+PROXY_PORT
+# (=> PEER), VK_LINK, THREADS, USE_UDP. Флаги ниже переопределяют.
+_HERE="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)"
+if [ -f "$_HERE/config.env" ]; then
+  # shellcheck disable=SC1091
+  . "$_HERE/config.env"
+  [ -n "${SERVER_IP:-}" ] && PEER="${SERVER_IP}:${PROXY_PORT:-56000}"
+  [ -n "${VK_LINK:-}" ] && VK_LINK="${VK_LINK}"
+  [ -n "${THREADS:-}" ] && THREADS="${THREADS}"
+  [ "${USE_UDP:-0}" = "1" ] && USE_UDP="1"
+fi
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --peer)        PEER="$2"; shift 2 ;;

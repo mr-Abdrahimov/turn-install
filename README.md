@@ -1,115 +1,160 @@
 # turn-install
 
-Установщики для **[vk-turn-proxy](https://github.com/cacggghp/vk-turn-proxy)** («Good TURN») —
-инструмента обхода блокировок, который туннелирует VPN-трафик через **TURN-релеи звонков
-VK / Яндекс Телемост**. Пакеты оборачиваются в DTLS 1.2 и STUN ChannelData, поэтому для DPI
-трафик выглядит как обычный видеозвонок.
+Установщики и документация для **[vk-turn-proxy](https://github.com/cacggghp/vk-turn-proxy)**
+(«Good TURN») — обход блокировок через **TURN-релеи звонков VK**. Трафик VPN шифруется в DTLS 1.2 и
+идёт через релеи VK, маскируясь под видеозвонок.
 
-Здесь два готовых скрипта: один поднимает **серверную часть** на Debian/Ubuntu VPS, второй
-ставит **клиентский транспорт** на роутер с **OpenWrt**. Внутренний VPN — **AmneziaWG**.
+Здесь: установщик **сервера** (Debian/Ubuntu VPS), установщик **клиента** для роутера **OpenWrt**,
+единый файл настроек `config.env`, патч клиента (обход бага капчи) и подробная документация.
 
-> ⚠️ **Ответственное использование.** Инструмент предназначен для обхода цензуры и защиты
-> приватности на **своих** серверах и со **своими** звонковыми ссылками. Upstream помечает
-> проект «только для учебных целей». Соблюдай законы своей юрисдикции.
+> ⚠️ Для законного использования на **своих** серверах и со **своими** ссылками на звонки.
+> Upstream: «только для учебных целей».
 
-> 🔴 **Важно про капчу VK.** Релизный клиент (v1.8.3) НЕ проходит новую капчу VK «Я Не Робот».
-> Нужен **пропатченный** клиент (`build-client.sh`, патч `patches/vk-captcha-not-robot.patch`), и
-> даже с ним капча решается **вручную через браузер** при каждой (пере)авторизации — полностью
-> автоматического headless-режима сейчас нет. См. **[docs/captcha-manual.md](docs/captcha-manual.md)**.
-> Проверено на живом стенде: сервер Ubuntu 24.04 + роутер OpenWrt (aarch64) — сквозной туннель
-> поднимается, внешний IP через туннель = IP сервера.
+---
 
-## Архитектура
+## Как это РЕАЛЬНО работает (важно, частое заблуждение)
+
+Многие думают, что «сервер и клиент оба заходят в звонок, и через звонок идёт трафик». **Это не так.**
+Проверено по исходникам ([`server/main.go`](https://github.com/cacggghp/vk-turn-proxy/blob/main/server/main.go)
+имеет всего 3 флага: `-listen`, `-connect`, `-vless` — **никакой ссылки на звонок**):
 
 ```
-[LAN] → AmneziaWG(awg0) ──► 127.0.0.1:9000 (vk-turn client) ──► DTLS/TURN через релеи VK ──►
-        │                                                                                    │
-        │  Endpoint=127.0.0.1:9000, MTU=1280                                                 ▼
-        └─────────────────────────────────────  VPS: vk-turn server (:56000)
-                                                 └─► 127.0.0.1:51820 (AmneziaWG server) ─► NAT ─► интернет
+┌─────────── РОУТЕР / КЛИЕНТ ───────────┐          ┌──────── VPS / СЕРВЕР ────────┐
+ LAN → AmneziaWG(VKTURN) → 127.0.0.1:9000            :56000 (vk-turn server, DTLS)
+        Endpoint=127.0.0.1:9000, MTU 1280               │ расшифровка
+              │                                          ▼
+        vk-turn client ──DTLS/ChannelData──►  TURN-релей VK  ──UDP──►  127.0.0.1:51820
+              │  (авторизуется в VK по ссылке звонка                    AmneziaWG server → NAT → интернет
+              │   ТОЛЬКО чтобы получить логин/пароль к TURN)
 ```
 
-- **vk-turn client** прячет UDP-трафик AmneziaWG в звонки VK и отправляет на VPS.
-- **vk-turn server** принимает на публичном порту `56000`, расшифровывает и отдаёт локальному
-  AmneziaWG (`127.0.0.1:51820`), а тот через NAT выпускает в интернет.
-- Наружу открыт **только порт 56000** (tcp+udp). Порт AmneziaWG не публикуется.
+- **В звонок никто не заходит.** Клиент авторизуется в VK по ссылке звонка **только чтобы добыть
+  логин/пароль к TURN-серверу** VK.
+- Клиент делает **TURN Allocation** на релее VK и говорит: «шли мои пакеты на `SERVER_IP:56000`».
+  Релей VK пересылает их на твой сервер по UDP. Сервер — обычный TURN **peer** с публичным IP.
+- **Серверу ссылка на звонок НЕ нужна**, нужен только публичный IP и открытый порт 56000.
+- Обратный путь: сервер → релей → клиент.
+
+Итог: ссылка на звонок нужна **только на роутере** (клиенту), сервер её не знает.
+
+---
 
 ## Быстрый старт
+
+### 0. Заполни `config.env`
+
+```bash
+cp config.env.example config.env
+nano config.env      # SERVER_IP, PROXY_PORT, VK_LINK — минимум
+```
 
 ### 1. Сервер (Debian/Ubuntu VPS)
 
 ```bash
-sudo bash install-server.sh
-# или с параметрами:
-sudo bash install-server.sh --proxy-port 56000 --awg-port 51820 --client-name router -y
+sudo bash install-server.sh          # читает config.env сам
 ```
-
-Скрипт:
-1. ставит зависимости и **AmneziaWG** (DKMS-модуль + `amneziawg-tools`), включает форвардинг;
-2. генерирует серверный `awg0.conf` (ключи + случайная обфускация) и поднимает интерфейс;
-3. скачивает `server-linux-<arch>` из релизов и делает **systemd-сервис** `vk-turn-server`;
-4. открывает порт `56000` в firewall;
-5. генерирует **клиентский конфиг** `/root/awg-client-router.conf` (с уже правильным
-   `Endpoint = 127.0.0.1:9000`, `MTU = 1280`) и печатает данные для роутера + QR.
-
-После установки: `vkturn status | logs | restart`.
+Ставит AmneziaWG + vk-turn server + systemd + firewall, генерит клиентский конфиг
+`/root/awg-client-<имя>.conf` и печатает данные для роутера. Управление: `vkturn status|logs|restart`.
 
 ### 2. Роутер (OpenWrt)
 
+На роутере (файл кладём через `cat` по ssh — в dropbear нет sftp):
 ```sh
-sh install-openwrt.sh \
-  --peer <ПУБЛИЧНЫЙ_IP_VPS>:56000 \
-  --vk-link https://vk.com/call/join/XXXXXXXX
-# нестабильный хендшейк? добавь --udp
+# с ноутбука:
+cat install-openwrt.sh | ssh root@ROUTER 'cat > /tmp/i.sh'
+cat config.env         | ssh root@ROUTER 'cat > /tmp/config.env'
+# на роутере (config.env должен лежать рядом со скриптом):
+ssh root@ROUTER 'cd /tmp && sh i.sh'
 ```
+Ставит vk-turn client + procd-сервис `vkturn` + route-guard. Дальше — AmneziaWG-подключение
+(см. [docs/openwrt-amneziawg.md](docs/openwrt-amneziawg.md)).
 
-Скрипт определяет архитектуру роутера (`mips`, `mipsle`, `mips64le`, `arm`, `arm64`, `amd64`,
-`386`, `riscv64` — **кросс-компиляция не нужна**, бинарники уже в релизах), скачивает
-`client-linux-<arch>`, ставит **procd-сервис** `vkturn`, хелпер маршрутов `vkturn-routes`
-(защита от петли) и утилиту управления.
+> 🔴 **Внимание:** релизный клиент НЕ проходит новую капчу VK. Нужен **пропатченный** — собери его
+> через [`build-client.sh`](build-client.sh) и подмени `/usr/sbin/vkturn-client`. См. ниже.
 
-Дальше подключи AmneziaWG на роутере к `127.0.0.1:9000` — подробно в
-**[docs/openwrt-amneziawg.md](docs/openwrt-amneziawg.md)**.
+---
 
-Проверка: `logread -e vkturn` должен показать `Established DTLS connection!`.
+## Капча VK «Я Не Робот» — обязательно к прочтению
 
-## Что нужно заранее
+Релиз v1.8.3 не проходит текущую капчу VK (баг парсера + сама капча решается только браузером).
+Что сделано и как жить:
 
-- **VPS** на Debian/Ubuntu с публичным IP и открытым (у провайдера) портом `56000/tcp+udp`.
-- **Валидная ссылка на звонок VK** (`https://vk.com/call/join/…`) — из неё vk-turn client
-  берёт TURN-креды. Если соединение оборвётся, обнови ссылку: `vkturn set-link <URL>`.
-- Для OpenWrt-роутера: ~10 МБ свободного flash (иначе — extroot) и интернет на WAN.
+1. **Патч** [`patches/vk-captcha-not-robot.patch`](patches/vk-captcha-not-robot.patch):
+   - чинит парсер (не отбраковывает капчу без legacy-полей `captcha_sid`/`captcha_img`);
+   - таймаут ручной капчи 60с → 600с;
+   - кэш VK-кредов 10мин → 24ч (**переподключения не требуют новой капчи**, пока VK не отвергнет креды).
+2. **Сборка:** `./build-client.sh arm64` (или `mipsle`, `all`, …) — клонирует, патчит, кросс-компилит.
+3. **Решение капчи вручную** (при первой авторизации и когда VK реально сбросит креды):
+   ```sh
+   ssh -L 8765:localhost:8765 root@ROUTER      # проброс порта капчи
+   # в браузере открыть http://localhost:8765 и пройти чекбокс «Я не робот»
+   ```
+   Подробно: **[docs/captcha-manual.md](docs/captcha-manual.md)**.
+
+**Почему ВПН «отваливается на минуту».** Это переавторизация в VK: когда TURN-креды сбрасываются,
+клиент повторно логинится → упирается в капчу → простой, пока не решишь. Патч кэша (24ч) убирает
+лишние переавторизации — теперь капча нужна редко, а сетевые микрообрывы переподключаются без неё.
+Для стабильности также поставь `THREADS=1` в `config.env` (1 поток стабильнее, но лимит ~5 Мбит/с у VK).
+
+---
 
 ## Файлы
 
 | Файл | Назначение |
 |------|-----------|
+| [`config.env.example`](config.env.example) | **единый файл настроек** — скопируй в `config.env` и заполни |
 | [`install-server.sh`](install-server.sh) | сервер: AmneziaWG + vk-turn server + systemd + firewall |
 | [`install-openwrt.sh`](install-openwrt.sh) | роутер: vk-turn client + procd + route-guard |
-| [`build-client.sh`](build-client.sh) | собрать пропатченный клиент (обход бага капчи) из исходников |
-| [`patches/vk-captcha-not-robot.patch`](patches/vk-captcha-not-robot.patch) | фикс парсера капчи + таймаут ручного режима |
+| [`build-client.sh`](build-client.sh) | собрать **пропатченный** клиент (обход капчи) под любую arch |
+| [`patches/vk-captcha-not-robot.patch`](patches/vk-captcha-not-robot.patch) | фикс парсера + таймаут + кэш кредов 24ч |
 | [`uninstall-server.sh`](uninstall-server.sh) | удаление серверной части (`--purge-awg` — вместе с AWG) |
 | [`docs/openwrt-amneziawg.md`](docs/openwrt-amneziawg.md) | как связать AmneziaWG на OpenWrt с транспортом |
-| [`docs/captcha-manual.md`](docs/captcha-manual.md) | обход капчи VK «Я Не Робот» вручную через браузер |
+| [`docs/captcha-manual.md`](docs/captcha-manual.md) | ручное решение капчи VK через браузер |
 
-## Управление
+---
 
-**Сервер:** `vkturn {status|start|stop|restart|logs|uninstall}`
-**Роутер:** `vkturn {start|stop|restart|status|logs|set-peer|set-link|uninstall}`
+## Ручная установка по шагам (без скриптов)
 
-## Диагностика
+<details><summary>Сервер (Debian/Ubuntu)</summary>
 
-- Нет `Established DTLS connection!` → проверь `--peer`, открытость порта 56000 на VPS,
-  живость VK-ссылки.
-- DTLS есть, но AmneziaWG не встаёт → переустанови клиент с `--udp`, сверь ключи/обфускацию.
-- Тормозит → увеличь `--threads` (6–8), MTU снизь до 1240.
+```bash
+# 1. AmneziaWG (Ubuntu): PPA + пакеты
+add-apt-repository -y ppa:amnezia/ppa && apt update && apt install -y amneziawg amneziawg-tools qrencode
+# 2. Сгенерировать awg0.conf (ключи awg genkey, обфускация Jc/Jmin/Jmax/S1/S2/H1..H4), поднять:
+systemctl enable --now awg-quick@awg0
+sysctl -w net.ipv4.ip_forward=1        # + NAT masquerade в PostUp awg0.conf
+# 3. vk-turn server:
+curl -L -o /usr/local/bin/vk-turn-server \
+  https://github.com/cacggghp/vk-turn-proxy/releases/latest/download/server-linux-amd64
+chmod +x /usr/local/bin/vk-turn-server
+/usr/local/bin/vk-turn-server -listen 0.0.0.0:56000 -connect 127.0.0.1:51820   # (в systemd)
+# 4. Открыть 56000/tcp+udp в firewall провайдера.
+```
+</details>
 
-Подробнее — в [docs/openwrt-amneziawg.md](docs/openwrt-amneziawg.md).
+<details><summary>Роутер (OpenWrt)</summary>
 
-## Ссылки на первоисточники
+```sh
+# 1. Пропатченный клиент (собери build-client.sh на ПК, залей на роутер):
+#    cat build/client-linux-arm64 | ssh root@ROUTER 'cat > /usr/sbin/vkturn-client; chmod +x /usr/sbin/vkturn-client'
+# 2. Запуск (127.0.0.1:9000 — сюда цепляется AmneziaWG):
+vkturn-client -peer SERVER_IP:56000 -vk-link https://vk.ru/call/join/XXXX -listen 127.0.0.1:9000 -n 1
+# 3. AmneziaWG-интерфейс (uci, proto amneziawg): Endpoint=127.0.0.1:9000, MTU=1280,
+#    ключи/обфускацию взять из awg-client-*.conf с сервера. Поднять после 'Established DTLS connection!'.
+# 4. Капча: ssh -L 8765:localhost:8765 root@ROUTER → http://localhost:8765 → пройти чекбокс.
+```
+Полный рабочий пример UCI-интерфейса — в [docs/openwrt-amneziawg.md](docs/openwrt-amneziawg.md).
+</details>
 
-- Основной проект (Go): https://github.com/cacggghp/vk-turn-proxy
-- Референс-инсталлятор (архивный): https://github.com/NedgNDG/vk-proxy-auto-installer
-- Реализация на Rust: https://github.com/Urtyom-Alyanov/turn-proxy
-- AmneziaWG (сервер): https://github.com/amnezia-vpn/amneziawg-tools
+---
+
+## Проверка
+
+**Сервер:** `systemctl status vk-turn-server awg-quick@awg0`; `awg show`; `ss -lun | grep 56000`.
+**Роутер:** `logread -e vkturn` → `Established DTLS connection!`; `awg show VKTURN` → свежий handshake;
+`curl` через туннель возвращает **IP сервера**.
+
+## Ссылки
+
+- Проект: https://github.com/cacggghp/vk-turn-proxy
 - AmneziaWG для OpenWrt: https://github.com/amnezia-vpn/amneziawg-openwrt

@@ -33,6 +33,14 @@ SVC_NAME="vk-turn-server"
 ASSUME_YES=0
 CLIENT_NAME="router"
 
+# читаем config.env рядом со скриптом (если есть) — переопределяет дефолты выше,
+# флаги командной строки затем переопределяют config.env.
+_HERE="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)"
+if [ -f "$_HERE/config.env" ]; then
+  # shellcheck disable=SC1091
+  . "$_HERE/config.env"
+fi
+
 usage() {
   cat <<'EOF'
 Использование: sudo bash install-server.sh [опции]
