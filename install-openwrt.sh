@@ -204,12 +204,15 @@ CONF=/etc/vkturn/vkturn.conf
 
 start_service() {
   [ -f "$CONF" ] || { echo "vkturn: нет $CONF"; return 1; }
+  killall vkturn-client 2>/dev/null   # добить возможные зависшие процессы
   # shellcheck disable=SC1090
   . "$CONF"
   procd_open_instance
-  # stdout+stderr клиента -> route-guard (он же логирует всё в procd)
-  procd_set_param command /bin/sh -c \
-    "exec /usr/sbin/vkturn-client -peer \"$PEER\" $LINK_ARG -listen \"$LISTEN\" -n \"$THREADS\" $EXTRA 2>&1 | /usr/sbin/vkturn-routes"
+  # Клиент запускается НАПРЯМУЮ (без пайпа через sh -c), чтобы procd видел
+  # настоящий PID и чисто убивал его при stop/restart. Иначе зависший клиент
+  # держит 127.0.0.1:9000 и новый инстанс падает с "address already in use".
+  # shellcheck disable=SC2086
+  procd_set_param command /usr/sbin/vkturn-client -peer "$PEER" $LINK_ARG -listen "$LISTEN" -n "$THREADS" $EXTRA
   procd_set_param respawn 3600 5 0
   procd_set_param stdout 1
   procd_set_param stderr 1
@@ -217,7 +220,7 @@ start_service() {
 }
 
 stop_service() {
-  :
+  killall vkturn-client 2>/dev/null
 }
 INIT
 chmod +x /etc/init.d/vkturn
