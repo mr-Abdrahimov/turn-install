@@ -20,7 +20,7 @@ PEER=""
 VK_LINK=""
 YANDEX_LINK=""
 LISTEN="127.0.0.1:9000"
-THREADS="4"
+THREADS="16"
 USE_UDP="0"
 EXTRA=""
 CORE_REPO="cacggghp/vk-turn-proxy"
@@ -36,7 +36,7 @@ usage() {
   --vk-link URL        ссылка на звонок VK (https://vk.com/call/join/...)  [обязательно*]
   --yandex-link URL    ссылка Яндекс Телемост (альтернатива --vk-link)
   --listen ADDR        локальный адрес прослушки (по умолчанию 127.0.0.1:9000)
-  --threads N          число параллельных потоков (-n, по умолчанию 4)
+  --threads N          число параллельных потоков (-n, по умолчанию 16)
   --udp                UDP-режим (стабильнее для WG/AWG-хендшейка)
   --core-repo R        репозиторий релизов (по умолч. cacggghp/vk-turn-proxy)
   --extra "ARGS"       произвольные доп. флаги vk-turn client

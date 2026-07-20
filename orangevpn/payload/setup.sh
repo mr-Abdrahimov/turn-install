@@ -57,7 +57,7 @@ if [ ! -f /etc/vkturn/vkturn.conf ]; then
 	cat > /etc/vkturn/vkturn.conf <<'EOF'
 PEER=""
 LISTEN="127.0.0.1:9000"
-THREADS="4"
+THREADS="16"
 LINK_ARG=""
 EXTRA=""
 EOF

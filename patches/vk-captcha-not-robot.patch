@@ -1,5 +1,5 @@
 diff --git a/client/main.go b/client/main.go
-index 73dfd17..b5bc77c 100644
+index 73dfd17..2e9c022 100644
 --- a/client/main.go
 +++ b/client/main.go
 @@ -302,23 +302,22 @@ func ParseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
@@ -32,7 +32,7 @@ index 73dfd17..b5bc77c 100644
  	}
  
  	// Extract error_msg
-@@ -618,7 +617,12 @@ type StreamCredentialsCache struct {
+@@ -618,13 +617,77 @@ type StreamCredentialsCache struct {
  }
  
  const (
@@ -46,7 +46,106 @@ index 73dfd17..b5bc77c 100644
  	cacheSafetyMargin  = 60 * time.Second
  	maxCacheErrors     = 3
  	errorWindow        = 10 * time.Second
-@@ -956,7 +960,9 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
+ 	streamsPerCache    = 10
+ )
+ 
++// ---- Персист TURN-кредов на диск ----
++// Кэш кредов живёт в памяти и терялся при каждом рестарте процесса, из-за чего
++// ЛЮБОЙ перезапуск (смена флагов, перезагрузка роутера, respawn) требовал заново
++// проходить капчу VK. Сохраняем креды на диск и переиспользуем, пока они живы —
++// капча нужна только когда VK их реально отвергнет.
++var credsFilePath = func() string {
++	if p := os.Getenv("VKTURN_CREDS_FILE"); p != "" {
++		return p
++	}
++	return "/etc/vkturn/creds.json"
++}()
++
++type persistedCreds struct {
++	Username   string    `json:"username"`
++	Password   string    `json:"password"`
++	ServerAddr string    `json:"server_addr"`
++	ExpiresAt  time.Time `json:"expires_at"`
++	Link       string    `json:"link"`
++}
++
++func saveCredsToDisk(c TurnCredentials) {
++	b, err := json.Marshal(persistedCreds{
++		Username: c.Username, Password: c.Password, ServerAddr: c.ServerAddr,
++		ExpiresAt: c.ExpiresAt, Link: c.Link,
++	})
++	if err != nil {
++		return
++	}
++	tmp := credsFilePath + ".tmp"
++	if err := os.WriteFile(tmp, b, 0600); err != nil {
++		return
++	}
++	if err := os.Rename(tmp, credsFilePath); err != nil {
++		_ = os.Remove(tmp)
++		return
++	}
++	log.Printf("[VK Auth] Креды сохранены на диск (%s)", credsFilePath)
++}
++
++func loadCredsFromDisk(link string) (TurnCredentials, bool) {
++	b, err := os.ReadFile(credsFilePath)
++	if err != nil {
++		return TurnCredentials{}, false
++	}
++	var p persistedCreds
++	if err := json.Unmarshal(b, &p); err != nil {
++		return TurnCredentials{}, false
++	}
++	if p.Link != link || p.Username == "" || time.Now().After(p.ExpiresAt) {
++		return TurnCredentials{}, false
++	}
++	return TurnCredentials{
++		Username: p.Username, Password: p.Password, ServerAddr: p.ServerAddr,
++		ExpiresAt: p.ExpiresAt, Link: p.Link,
++	}, true
++}
++
++func dropCredsFromDisk() { _ = os.Remove(credsFilePath) }
++
+ func getCacheID(streamID int) int {
+ 	return streamID / streamsPerCache
+ }
+@@ -704,6 +767,10 @@ func (c *StreamCredentialsCache) invalidate(streamID int) {
+ 	c.creds = TurnCredentials{}
+ 	c.mutex.Unlock()
+ 
++	// VK отверг эти креды — убираем и с диска, иначе следующий старт снова
++	// попробует их и снова упрётся в ту же ошибку.
++	dropCredsFromDisk()
++
+ 	c.errorCount.Store(0)
+ 	c.lastErrorTime.Store(0)
+ 
+@@ -734,12 +801,22 @@ func getVkCredsCached(ctx context.Context, link string, streamID int, dialer *dn
+ 		return cache.creds.Username, cache.creds.Password, cache.creds.ServerAddr, nil
+ 	}
+ 
++	// Перед походом в VK (=капча) пробуем креды, сохранённые на диск прошлым
++	// запуском: это делает рестарт клиента бесплатным по капче.
++	if pc, ok := loadCredsFromDisk(link); ok {
++		cache.creds = pc
++		log.Printf("[STREAM %d] [VK Auth] Использую сохранённые креды с диска (годны ещё %v) — капча не нужна",
++			streamID, time.Until(pc.ExpiresAt).Truncate(time.Second))
++		return pc.Username, pc.Password, pc.ServerAddr, nil
++	}
++
+ 	user, pass, addr, err := fetchVkCredsSerialized(ctx, link, streamID, dialer)
+ 	if err != nil {
+ 		return "", "", "", err
+ 	}
+ 
+ 	cache.creds = TurnCredentials{Username: user, Password: pass, ServerAddr: addr, ExpiresAt: time.Now().Add(credentialLifetime - cacheSafetyMargin), Link: link}
++	saveCredsToDisk(cache.creds)
+ 	return user, pass, addr, nil
+ }
+ 
+@@ -956,7 +1033,9 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
  					}
  				case captchaSolveModeManual:
  					log.Printf("[STREAM %d] [Captcha] Triggering manual captcha fallback...", streamID)
