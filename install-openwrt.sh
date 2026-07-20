@@ -269,7 +269,13 @@ PEER_IP="${AWG_PEER_IP}"
 POLL_OK=20; POLL_BAD=10; HARD_AFTER=18
 LOG(){ logger -t vkturn-wd "\$*"; }
 lan_ip(){ uci -q get network.lan.ipaddr 2>/dev/null || echo "<ip-роутера>"; }
-tunnel_ok(){ ping -c1 -W3 "\$PEER_IP" >/dev/null 2>&1; }
+handshake_age(){
+  hs="\$(awg show "\$IFACE" latest-handshakes 2>/dev/null | awk '{print \$2; exit}')"
+  [ -n "\$hs" ] && [ "\$hs" -gt 0 ] 2>/dev/null || return 1
+  echo \$(( \$(date +%s) - hs ))
+}
+# здоровье по возрасту handshake: ICMP через TURN теряется и даёт ложные срабатывания
+tunnel_ok(){ age="\$(handshake_age)" && [ "\$age" -lt 200 ] && return 0; ping -c3 -W2 "\$PEER_IP" >/dev/null 2>&1; }
 client_running(){ pgrep -f "/usr/sbin/vkturn-client" >/dev/null 2>&1; }
 captcha_pending(){ netstat -lnt 2>/dev/null | grep -q ":8765" || ss -lnt 2>/dev/null | grep -q ":8765"; }
 LOG "watchdog запущен (iface=\$IFACE peer=\$PEER_IP)"
@@ -313,7 +319,7 @@ cat > /etc/hotplug.d/iface/99-vkturn-recover <<HP
 #!/bin/sh
 [ "\$ACTION" = "ifup" ] || exit 0
 case "\$INTERFACE" in
-  wan|wan6|${AWG_IFACE}) ( sleep 3; ifup ${AWG_IFACE} 2>/dev/null ) & ;;
+  wan|wan6) ( sleep 5; ifup ${AWG_IFACE} 2>/dev/null ) & ;;
 esac
 HP
 chmod +x /etc/hotplug.d/iface/99-vkturn-recover

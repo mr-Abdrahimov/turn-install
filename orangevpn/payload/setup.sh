@@ -92,26 +92,43 @@ chmod +x /etc/init.d/vkturn
 # ---------- 4. watchdog (следит за $IFACE, авто-восстановление) ----------
 cat > /usr/sbin/vkturn-watchdog <<WD
 #!/bin/sh
-# Восстанавливает туннель при обрыве (напр. reload zeroblock). Без капчи, пока
-# клиент жив и креды в кэше. Клиента не трогает, если ждёт капчу.
+# Восстанавливает туннель при РЕАЛЬНОМ обрыве. Здоровье определяется по ВОЗРАСТУ
+# HANDSHAKE (авторитетный признак WireGuard/AmneziaWG), а не по ICMP: ICMP через
+# TURN-релей теряется, и ping-проверка ложно срабатывала, дёргая ifup, что
+# пересоздавало интерфейс и рвало живые соединения.
 IFACE="${IFACE}"
 PEER_IP="${PEER_IP}"
-POLL_OK=20; POLL_BAD=10; HARD_AFTER=18
+POLL_OK=25; POLL_BAD=15
+HS_MAX=200          # handshake свежее этого = туннель жив
+GRACE=3             # столько подряд неудач до вмешательства
+HARD_AFTER=20       # крайняя мера — перезапуск клиента
 LOG(){ logger -t vkturn-wd "\$*"; }
 lan_ip(){ uci -q get network.lan.ipaddr 2>/dev/null || echo "<ip-роутера>"; }
-tunnel_ok(){ ping -c1 -W3 "\$PEER_IP" >/dev/null 2>&1; }
 client_running(){ pgrep -f "/usr/sbin/vkturn-client" >/dev/null 2>&1; }
 captcha_pending(){ netstat -lnt 2>/dev/null | grep -q ":8765" || ss -lnt 2>/dev/null | grep -q ":8765"; }
-LOG "watchdog запущен (iface=\$IFACE peer=\$PEER_IP)"
+handshake_age(){
+  hs="\$(awg show "\$IFACE" latest-handshakes 2>/dev/null | awk '{print \$2; exit}')"
+  [ -n "\$hs" ] && [ "\$hs" -gt 0 ] 2>/dev/null || return 1
+  echo \$(( \$(date +%s) - hs ))
+}
+tunnel_ok(){
+  age="\$(handshake_age)" && [ "\$age" -lt "\$HS_MAX" ] && return 0
+  ping -c3 -W2 "\$PEER_IP" >/dev/null 2>&1 && return 0
+  return 1
+}
+LOG "watchdog запущен (iface=\$IFACE, handshake<\${HS_MAX}s, запас \${GRACE})"
 FAILS=0
 while :; do
   if tunnel_ok; then
-    [ "\$FAILS" -gt 0 ] && LOG "туннель восстановлен"; FAILS=0; sleep "\$POLL_OK"; continue
+    [ "\$FAILS" -ge "\$GRACE" ] && LOG "туннель восстановлен"
+    FAILS=0; sleep "\$POLL_OK"; continue
   fi
   if captcha_pending; then
     LOG "туннель down: ждёт КАПЧУ — открой https://\$(lan_ip):8765"; FAILS=0; sleep "\$POLL_BAD"; continue
   fi
-  FAILS=\$((FAILS+1)); LOG "туннель down (fail #\$FAILS) — восстанавливаю"
+  FAILS=\$((FAILS+1))
+  if [ "\$FAILS" -lt "\$GRACE" ]; then sleep "\$POLL_BAD"; continue; fi
+  [ "\$FAILS" -eq "\$GRACE" ] && LOG "туннель реально down (\$FAILS проверок) — восстанавливаю"
   client_running || { LOG "client не запущен -> старт"; /etc/init.d/vkturn start 2>/dev/null; sleep 8; }
   ifup "\$IFACE" 2>/dev/null
   if [ "\$FAILS" -ge "\$HARD_AFTER" ] && client_running && ! captcha_pending; then
@@ -143,9 +160,12 @@ chmod +x /etc/init.d/vkturn-watchdog
 mkdir -p /etc/hotplug.d/iface
 cat > /etc/hotplug.d/iface/99-vkturn-recover <<HP
 #!/bin/sh
+# Поднимаем туннель ТОЛЬКО когда вернулся WAN. Реагировать на ifup самого туннеля
+# НЕЛЬЗЯ — хук вызовет ifup на себя и уйдёт в бесконечный цикл пересоздания
+# интерфейса (рвёт соединения, интерфейс "исчезает" из LuCI).
 [ "\$ACTION" = "ifup" ] || exit 0
 case "\$INTERFACE" in
-  wan|wan6|${IFACE}) ( sleep 3; ifup ${IFACE} 2>/dev/null ) & ;;
+  wan|wan6) ( sleep 5; ifup ${IFACE} 2>/dev/null ) & ;;
 esac
 HP
 chmod +x /etc/hotplug.d/iface/99-vkturn-recover
